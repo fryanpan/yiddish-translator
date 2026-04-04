@@ -1,92 +1,92 @@
-"""Tests for the Yiddish translator."""
+"""Tests for the Yiddish translator (vision-based OCR + translation)."""
 
 import os
 import sys
 import pytest
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 from pathlib import Path
+from PIL import Image
 
 # Add parent dir to path so we can import translate
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from translate import extract_pages, translate_page, translate_pdf
+from translate import translate_page_image, parse_page_range, translate_pdf
 
 
-class TestExtractPages:
-    def test_returns_list_of_strings(self):
-        """extract_pages returns a list of strings, one per page."""
-        mock_doc = MagicMock()
-        mock_page1 = MagicMock()
-        mock_page1.get_text.return_value = "שלום וועלט"
-        mock_page2 = MagicMock()
-        mock_page2.get_text.return_value = "גוט מאָרגן"
-        mock_doc.__len__ = MagicMock(return_value=2)
-        mock_doc.__getitem__ = MagicMock(side_effect=[mock_page1, mock_page2])
+class TestParsePageRange:
+    def test_simple_range(self):
+        assert parse_page_range("1-3", 10) == [1, 2, 3]
 
-        with patch("fitz.open", return_value=mock_doc):
-            result = extract_pages("dummy.pdf")
+    def test_single_page(self):
+        assert parse_page_range("5", 10) == [5]
 
-        assert result == ["שלום וועלט", "גוט מאָרגן"]
-        mock_doc.close.assert_called_once()
+    def test_comma_separated(self):
+        assert parse_page_range("1,5,10", 10) == [1, 5, 10]
 
-    def test_empty_pdf(self):
-        """extract_pages handles a PDF with no pages."""
-        mock_doc = MagicMock()
-        mock_doc.__len__ = MagicMock(return_value=0)
-        mock_doc.__getitem__ = MagicMock(side_effect=IndexError)
+    def test_mixed(self):
+        assert parse_page_range("1,5-7,10", 15) == [1, 5, 6, 7, 10]
 
-        with patch("fitz.open", return_value=mock_doc):
-            result = extract_pages("empty.pdf")
+    def test_clamps_to_total_pages(self):
+        assert parse_page_range("8-15", 10) == [8, 9, 10]
 
-        assert result == []
+    def test_deduplicates(self):
+        assert parse_page_range("1-3,2-4", 10) == [1, 2, 3, 4]
 
 
-class TestTranslatePage:
-    def test_translates_non_empty_page(self):
-        """translate_page calls Claude and returns translated text."""
+class TestTranslatePageImage:
+    def test_calls_claude_with_image(self):
+        """translate_page_image sends the image to Claude and returns response text."""
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text="Hello world")]
         mock_client.messages.create.return_value = mock_response
 
-        result = translate_page(mock_client, "שלום וועלט", 1)
+        # Create a small dummy PIL image
+        image = Image.new("RGB", (100, 100), color="white")
+
+        result = translate_page_image(mock_client, image, 1)
 
         assert result == "Hello world"
         mock_client.messages.create.assert_called_once()
 
-        # Verify the call used the right model
-        call_kwargs = mock_client.messages.create.call_args
-        assert call_kwargs.kwargs["model"] == "claude-sonnet-4-6"
+        # Verify correct model and vision content
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        messages = call_kwargs["messages"]
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        # Should have image block and text block
+        types = [c["type"] for c in content]
+        assert "image" in types
+        assert "text" in types
 
-    def test_empty_page_returns_placeholder(self):
-        """translate_page returns a placeholder for empty pages."""
-        mock_client = MagicMock()
-        result = translate_page(mock_client, "   \n  ", 1)
-        assert result == "[Empty page]"
-        mock_client.messages.create.assert_not_called()
+    def test_api_error_returns_placeholder(self):
+        """translate_page_image returns error placeholder on API failure."""
+        import anthropic as anthropic_mod
 
-    def test_whitespace_only_page(self):
-        """translate_page treats whitespace-only pages as empty."""
         mock_client = MagicMock()
-        result = translate_page(mock_client, "\t\n\r  ", 2)
-        assert result == "[Empty page]"
+        mock_client.messages.create.side_effect = anthropic_mod.APIError(
+            message="Rate limit", request=MagicMock(), body={}
+        )
+
+        image = Image.new("RGB", (100, 100), color="white")
+        result = translate_page_image(mock_client, image, 1)
+
+        assert result.startswith("[Translation failed:")
 
 
 class TestTranslatePdf:
     def test_missing_input_file_exits(self):
-        """translate_pdf exits with error if input file doesn't exist."""
         with pytest.raises(SystemExit):
             translate_pdf("nonexistent.pdf", "output.md")
 
     def test_non_pdf_input_exits(self, tmp_path):
-        """translate_pdf exits with error if input is not a PDF."""
         txt_file = tmp_path / "book.txt"
         txt_file.write_text("some text")
         with pytest.raises(SystemExit):
             translate_pdf(str(txt_file), "output.md")
 
     def test_missing_api_key_exits(self, tmp_path):
-        """translate_pdf exits with error if ANTHROPIC_API_KEY is not set."""
         pdf_file = tmp_path / "book.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 fake content")
 
@@ -96,17 +96,17 @@ class TestTranslatePdf:
                 translate_pdf(str(pdf_file), "output.md")
 
     def test_full_translation_flow(self, tmp_path):
-        """translate_pdf orchestrates extraction and translation correctly."""
+        """translate_pdf converts images and translates each page."""
         pdf_file = tmp_path / "book.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 fake content")
         output_file = tmp_path / "output.md"
 
-        mock_pages = ["שלום וועלט", "גוט מאָרגן"]
+        mock_images = [Image.new("RGB", (100, 100)), Image.new("RGB", (100, 100))]
         mock_translations = ["Hello world", "Good morning"]
 
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("translate.extract_pages", return_value=mock_pages):
-                with patch("translate.translate_page", side_effect=mock_translations):
+            with patch("translate.convert_from_path", return_value=mock_images):
+                with patch("translate.translate_page_image", side_effect=mock_translations):
                     with patch("anthropic.Anthropic"):
                         translate_pdf(str(pdf_file), str(output_file))
 
@@ -116,17 +116,16 @@ class TestTranslatePdf:
         assert "Hello world" in content
         assert "## Page 2" in content
         assert "Good morning" in content
-        assert f"# Translation of: book.pdf" in content
+        assert "# Translation of: book.pdf" in content
 
     def test_creates_output_directory(self, tmp_path):
-        """translate_pdf creates the output directory if it doesn't exist."""
         pdf_file = tmp_path / "book.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 fake content")
         output_file = tmp_path / "subdir" / "output.md"
 
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("translate.extract_pages", return_value=["text"]):
-                with patch("translate.translate_page", return_value="translation"):
+            with patch("translate.convert_from_path", return_value=[Image.new("RGB", (100, 100))]):
+                with patch("translate.translate_page_image", return_value="translation"):
                     with patch("anthropic.Anthropic"):
                         translate_pdf(str(pdf_file), str(output_file))
 
