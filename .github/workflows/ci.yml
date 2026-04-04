@@ -19,8 +19,10 @@ jobs:
       - name: Set up Python
         run: uv python install 3.13
 
-      - name: Install dependencies
-        run: uv pip install --system anthropic pymupdf pytest
+      - name: Create venv and install dependencies
+        run: |
+          uv venv --python 3.13
+          uv pip install -r requirements.txt pytest
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: uv run pytest tests/ -v
