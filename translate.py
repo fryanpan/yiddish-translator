@@ -18,7 +18,7 @@ import io
 from pathlib import Path
 
 import anthropic
-from pdf2image import convert_from_path
+import fitz  # PyMuPDF
 
 
 SYSTEM_PROMPT = """You are an expert translator specializing in Yiddish manuscripts and historical texts.
@@ -127,47 +127,25 @@ def translate_pdf(input_path: str, output_path: str, pages_arg: str | None = Non
     client = anthropic.Anthropic(api_key=api_key)
     pdf_name = Path(input_path).name
 
-    # Determine page range for conversion
-    if pages_arg:
-        # We need total pages first — do a cheap metadata-only approach
-        print("Scanning PDF to determine total pages...")
-        # Convert just first page to get info, then figure out total from convert
-        # pdf2image doesn't have a cheap page count — use poppler info
-        import subprocess
-        result = subprocess.run(
-            ["pdfinfo", input_path], capture_output=True, text=True
-        )
-        total_pages = 1
-        for line in result.stdout.splitlines():
-            if line.startswith("Pages:"):
-                total_pages = int(line.split(":")[1].strip())
-                break
-        if total_pages == 1 and not result.stdout:
-            # Fallback: convert all and count
-            print("Could not read PDF info, converting all pages...")
-            total_pages = None
+    doc = fitz.open(input_path)
+    total_pages = len(doc)
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
 
-        if total_pages:
-            page_list = parse_page_range(pages_arg, total_pages)
-            print(f"Processing pages: {page_list}")
-            print(f"Converting {len(page_list)} page(s) to images at {dpi} DPI...")
-            images = []
-            for p in page_list:
-                imgs = convert_from_path(input_path, dpi=dpi, first_page=p, last_page=p)
-                images.extend(imgs)
-            pages_to_process = page_list
-        else:
-            print(f"Converting all pages to images at {dpi} DPI...")
-            images = convert_from_path(input_path, dpi=dpi)
-            total_pages = len(images)
-            pages_to_process = parse_page_range(pages_arg, total_pages)
-            images = [images[p - 1] for p in pages_to_process]
+    def render_page(page_num: int):
+        """Render a 1-based page number to a PIL Image."""
+        from PIL import Image as PILImage
+        pix = doc[page_num - 1].get_pixmap(matrix=mat)
+        return PILImage.open(io.BytesIO(pix.tobytes("jpeg")))
+
+    # Determine page range
+    if pages_arg:
+        pages_to_process = parse_page_range(pages_arg, total_pages)
+        print(f"Processing pages: {pages_to_process}")
     else:
-        print(f"Converting all pages to images at {dpi} DPI...")
-        images = convert_from_path(input_path, dpi=dpi)
-        total_pages = len(images)
         pages_to_process = list(range(1, total_pages + 1))
         print(f"Found {total_pages} pages.")
+
+    images = [render_page(p) for p in pages_to_process]
 
     # Load existing output if doing partial re-run (pages_arg set)
     existing_content = {}
