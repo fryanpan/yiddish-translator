@@ -95,17 +95,34 @@ class TestTranslatePdf:
             with pytest.raises(SystemExit):
                 translate_pdf(str(pdf_file), "output.md")
 
+    def _make_mock_doc(self, num_pages: int):
+        """Build a minimal fitz document mock that render_page() can use."""
+        import io as _io
+        buf = _io.BytesIO()
+        Image.new("RGB", (100, 100)).save(buf, format="JPEG")
+        jpeg_bytes = buf.getvalue()
+
+        mock_pix = MagicMock()
+        mock_pix.tobytes.return_value = jpeg_bytes
+
+        mock_page = MagicMock()
+        mock_page.get_pixmap.return_value = mock_pix
+
+        mock_doc = MagicMock()
+        mock_doc.__len__.return_value = num_pages
+        mock_doc.__getitem__.return_value = mock_page
+        return mock_doc
+
     def test_full_translation_flow(self, tmp_path):
         """translate_pdf converts images and translates each page."""
         pdf_file = tmp_path / "book.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 fake content")
         output_file = tmp_path / "output.md"
 
-        mock_images = [Image.new("RGB", (100, 100)), Image.new("RGB", (100, 100))]
         mock_translations = ["Hello world", "Good morning"]
 
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("translate.convert_from_path", return_value=mock_images):
+            with patch("translate.fitz.open", return_value=self._make_mock_doc(2)):
                 with patch("translate.translate_page_image", side_effect=mock_translations):
                     with patch("anthropic.Anthropic"):
                         translate_pdf(str(pdf_file), str(output_file))
@@ -124,7 +141,7 @@ class TestTranslatePdf:
         output_file = tmp_path / "subdir" / "output.md"
 
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("translate.convert_from_path", return_value=[Image.new("RGB", (100, 100))]):
+            with patch("translate.fitz.open", return_value=self._make_mock_doc(1)):
                 with patch("translate.translate_page_image", return_value="translation"):
                     with patch("anthropic.Anthropic"):
                         translate_pdf(str(pdf_file), str(output_file))
